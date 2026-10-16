@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Audit visuel automatisé de la configuration des salles de cours (COCO-SSD + OWL-ViT), sans détection de personnes." />
+  <meta name="theme-color" content="#0f172a" />
+  <title>EPITA Smart Classroom - Audit de Salle IA</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f172a'/%3E%3Cpath d='M8 17l5 5 11-12' fill='none' stroke='%2322d3ee' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <link rel="dns-prefetch" href="https://huggingface.co" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- defer : n'bloque plus le rendu ; l'ordre d'exécution est conservé (tfjs → coco-ssd → app.js) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <a href="#audit-section" class="skip-link">Aller au rapport d'audit</a>
+
+  <!-- Header -->
+  <header class="bg-slate-900 text-white shadow-md">
+    <div class="max-w-7xl mx-auto px-4 py-5 flex flex-wrap justify-between items-center gap-3">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-cyan-400">EPITA Smart Classroom</h1>
+        <p class="text-sm text-slate-300 mt-1">
+          Module d'audit visuel automatisé pour la vérification de configuration des salles de cours.
+        </p>
+      </div>
+      <span class="bg-slate-800 text-cyan-300 text-xs px-3 py-1 rounded-full border border-cyan-500/30 font-mono">
+        COCO-SSD v2.2.3 + OWL-ViT
+      </span>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- Bannière Éthique & RGPD -->
+    <div class="ethics-banner flex items-center gap-3" role="note">
+      <svg class="w-6 h-6 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+      </svg>
+      <div>
+        <strong>Exclusion RGPD / Éthique Obligatoire :</strong> La détection des personnes est <strong>strictement désactivée</strong>. La classe <code>person</code> est ignorée lors de l'analyse. Aucune image ni donnée biométrique n'est conservée ni transmise.
+      </div>
+    </div>
+
+    <!-- Zone Principale : Caméra & Configuration -->
+    <div class="grid lg:grid-cols-3 gap-6 items-start">
+
+      <!-- Colonne 1 & 2 : Stage Caméra/Image -->
+      <section class="lg:col-span-2 bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold text-slate-800">Flux Vidéo / Image de test</h2>
+          <span id="source-badge" class="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded">Inactif</span>
+        </div>
+
+        <div class="stage">
+          <video id="webcam" autoplay muted playsinline width="640" height="480" aria-hidden="true"></video>
+          <canvas id="canvas" width="640" height="480" role="img" aria-label="Image analysée avec les objets détectés encadrés"></canvas>
+          <div id="overlay" class="stage-overlay">
+            <span>Démarrez la caméra ou importez une photo de la salle</span>
+          </div>
+        </div>
+
+        <!-- Contrôles -->
+        <div class="flex flex-wrap gap-2 mt-4">
+          <button id="btn-start" class="btn btn-primary">Démarrer Caméra</button>
+          <button id="btn-stop" class="btn" disabled>Arrêter Caméra</button>
+          <button id="btn-image" class="btn">Importer une Image</button>
+          <input id="file-input" type="file" accept="image/*" class="sr-only" />
+          <button id="btn-audit" class="btn btn-accent" disabled>Lancer l'Audit de la Salle</button>
+        </div>
+
+        <p id="status" class="text-sm text-slate-500 mt-3 font-medium status-loading" aria-live="polite">
+          Chargement du modèle de détection d'objets…
+        </p>
+
+        <!-- Progress bar -->
+        <div id="progress-wrap" class="progress-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progression">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+      </section>
+
+      <!-- Colonne 3 : Configuration Théorique -->
+      <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-5 lg:sticky lg:top-4">
+        <h2 class="text-lg font-semibold text-slate-800 mb-1">Configuration Attendue</h2>
+        <p class="text-xs text-slate-500 mb-3">Ajustez les quantités théoriques de la salle à contrôler :</p>
+
+        <form id="config-form" class="space-y-1" onsubmit="return false"></form>
+
+        <hr class="my-4 border-slate-200" />
+
+        <!-- Réglage du seuil de confiance -->
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label for="threshold" class="text-sm font-medium text-slate-700">Seuil de confiance IA</label>
+            <span id="threshold-value" class="text-sm font-bold text-teal-700">50 %</span>
+          </div>
+          <input id="threshold" type="range" min="10" max="95" step="5" value="50" class="w-full accent-teal-600" />
+        </div>
+
+        <!-- Détection complémentaire OWL-ViT -->
+        <div class="mt-5 p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+          <label class="flex items-center gap-2 text-sm font-medium text-slate-700 cursor-pointer">
+            <input id="owl-enabled" type="checkbox" checked class="accent-teal-600" />
+            Détection complémentaire OWL-ViT
+          </label>
+          <p class="text-xs text-slate-600">
+            Tableau, fenêtres, stores, vidéoprojecteur, portes, extincteurs (hors vocabulaire COCO-SSD).
+            Au premier lancement, le modèle est téléchargé (volumineux), puis mis en cache par le navigateur.
+          </p>
+          <div class="flex justify-between items-center">
+            <label for="owl-threshold" class="text-xs font-medium text-slate-700">Seuil OWL-ViT</label>
+            <span id="owl-threshold-value" class="text-xs font-bold text-amber-700">10 %</span>
+          </div>
+          <input id="owl-threshold" type="range" min="1" max="50" step="1" value="10" class="w-full accent-amber-600" />
+          <p class="text-xs text-slate-400 italic">Détection zero-shot, moins fiable que COCO-SSD : contrôle visuel recommandé.</p>
+        </div>
+      </section>
+    </div>
+
+    <!-- Tableau de bord Synthétique -->
+    <section class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="kpi">
+        <span class="kpi-label">Objets Détectés</span>
+        <span id="kpi-total" class="kpi-value text-slate-800">0</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Confiance Moyenne</span>
+        <span id="kpi-rate" class="kpi-value text-cyan-700">–</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Temps d'Analyse</span>
+        <span id="kpi-time" class="kpi-value text-teal-700">–</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-label">Statut Global</span>
+        <span id="kpi-status" class="kpi-value text-sm font-semibold text-slate-400">En attente</span>
+      </div>
+    </section>
+
+    <!-- Résultats détaillés de l'Audit -->
+    <section id="audit-section" class="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+      <div class="flex flex-wrap justify-between items-center gap-3 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-slate-800">Rapport d'Audit de la Salle</h2>
+          <p class="text-xs text-slate-500">Comparaison entre le paramétrage théorique et l'analyse visuelle</p>
+        </div>
+        <button id="btn-export" class="btn text-xs bg-slate-100 hover:bg-slate-200 border-slate-300" disabled>
+          📄 Exporter le Rapport
+        </button>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <caption class="sr-only">Comparaison entre équipements attendus et détectés</caption>
+          <thead class="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+            <tr>
+              <th scope="col" class="py-3 px-4">Équipement / Catégorie</th>
+              <th scope="col" class="py-3 px-4">Attendu</th>
+              <th scope="col" class="py-3 px-4">Détecté</th>
+              <th scope="col" class="py-3 px-4">Écart</th>
+              <th scope="col" class="py-3 px-4">Statut de Vérification</th>
+            </tr>
+          </thead>
+          <tbody id="audit-body" class="divide-y divide-slate-100" aria-live="polite">
+            <tr>
+              <td colspan="5" class="py-6 text-center text-slate-400">
+                Aucun audit exécuté. Lancez la caméra ou importez une image puis cliquez sur « Lancer l'Audit ».
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="text-center text-xs text-slate-400 py-6 border-t border-slate-200 mt-8">
+    EPITA Smart Classroom · Examen IA for Managers · Modèle COCO-SSD (TensorFlow.js) · Déploiement Cloudflare Pages
+  </footer>
+
+  <script type="module" src="owl.js"></script>
+  <script defer src="app.js"></script>
+</body>
+</html>
